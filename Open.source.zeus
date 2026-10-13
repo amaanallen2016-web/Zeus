@@ -1,0 +1,1397 @@
+--==========================================================================
+-- ZEUS v21.6 — Neverlose UI · Max FPS Booster · Adaptive AP
+--==========================================================================
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local okLib, Library = pcall(function()
+    return loadstring(game:HttpGet(
+        "https://raw.githubusercontent.com/ImInsane-1337/neverlose-ui/refs/heads/main/source/library.lua"))()
+end)
+if not okLib or not Library then warn("[Zeus] Neverlose UI load failed:", Library) return end
+
+local CheatName = "Zeus"
+Library.Folders = {
+    Directory = CheatName,
+    Configs = CheatName .. "/Configs",
+    Assets = CheatName .. "/Assets",
+}
+
+local Accent = Color3.fromRGB(100, 150, 220)
+local Gradient = Color3.fromRGB(30, 60, 110)
+Library.Theme.Accent = Accent
+Library.Theme.AccentGradient = Gradient
+Library:ChangeTheme("Accent", Accent)
+Library:ChangeTheme("AccentGradient", Gradient)
+
+-- ===========================================================================
+-- SERVICES
+-- ===========================================================================
+local Players = game:GetService("Players")
+local RS      = game:GetService("ReplicatedStorage")
+local Run     = game:GetService("RunService")
+local UIS     = game:GetService("UserInputService")
+local Stats   = game:GetService("Stats")
+local Tween   = game:GetService("TweenService")
+local Lighting= game:GetService("Lighting")
+local Snd     = game:GetService("SoundService")
+
+local LP    = Players.LocalPlayer
+local Alive = workspace:FindFirstChild("Alive") or workspace:WaitForChild("Alive", 10)
+local Balls = workspace:FindFirstChild("Balls") or workspace:WaitForChild("Balls", 10)
+local PingItem = Stats.Network.ServerStatsItem["Data Ping"]
+if not Alive or not Balls then warn("[Zeus] Not in round") return end
+
+local cam = workspace.CurrentCamera
+
+-- ===========================================================================
+-- WINDOW
+-- ===========================================================================
+local Window = Library:Window({
+    Name = "Zeus",
+    SubName = "v21.6",
+    Logo = "120959262762131",
+})
+
+local KeybindList = Library:KeybindList("Keybinds")
+
+Library:Watermark({ "Zeus", "v21.6", 120959262762131 })
+
+task.spawn(function()
+    while true do
+        local FPS = math.floor(1 / Run.RenderStepped:Wait())
+        Library:Watermark({ "Zeus", "v21.6", 120959262762131, "FPS: " .. FPS })
+        task.wait(0.5)
+    end
+end)
+
+-- ===========================================================================
+-- SOUND POOL
+-- ===========================================================================
+local SOUND_IDS = {
+    Default = "6895079853", Sword = "9125402735", Slash = "5660358446",
+    Punch = "5792993183", Metal = "6042053626", Boom = "5801257793",
+    Pop = "6054840878", Chime = "5653590647",
+}
+
+local soundPool = {}
+task.spawn(function()
+    pcall(function() Snd.Volume = 1 end)
+    pcall(function() Snd.RespectFilteringEnabled = false end)
+    for name, id in pairs(SOUND_IDS) do
+        local s = Instance.new("Sound")
+        s.Name = "Zeus_" .. name
+        s.SoundId = "rbxassetid://" .. id
+        s.Volume = 0.5
+        s.Parent = Snd
+        soundPool[name] = s
+        pcall(function() s:Play(); s:Stop() end)
+    end
+    print("[Zeus] Sound pool ready")
+end)
+
+-- ===========================================================================
+-- CONFIG
+-- ===========================================================================
+local CFG = {
+    AutoParry=false, AutoSpam=false, AutoWin=false,
+    RespectGameBlocks=true, Cooldown=0.05, SpamInterval=0.05,
+    MultiFire=3, MaxDist=200, Prediction=true,
+    HitSound=false, HitSoundPreset="Default", HitVolume=0.5,
+    BallTrail=false, TrailR=100, TrailG=150, TrailB=220,
+    BallFire=false, FireR=255, FireG=120, FireB=40,
+    BallSmoke=false, SmokeR=200, SmokeG=200, SmokeB=200,
+    BallSparkle=false, BallGlow=false,
+    EspBalls=false, EspPlayers=false, EspDist=true,
+    SpeedEnabled=false, SpeedValue=16, JumpEnabled=false, JumpValue=50,
+    InfiniteJump=false, Noclip=false,
+    ManualBtn=false, ManualActive=false, ManualBurst=8, ManualInterval=0,
+    AntiGhost=true, MaxCPS=480, AdaptiveRate=true,
+    MaxCPS_URE=4000, RateRampStep=0.10, RateBackoffFactor=0.5,
+    FailureThreshold=3, SuccessWindow=2.0,
+    FPSBoost=false, FPSBoostLevel=5, MaxFPS=999,
+    AntiLag=false, AntiLagInterval=5,
+}
+
+-- ===========================================================================
+-- STATE
+-- ===========================================================================
+local S = {
+    active=true, reason="Idle", calls=0,
+    cps=0, callsInWindow=0, lastAttempt=-math.huge,
+    backoffUntil=0, consecutiveFails=0,
+    espFolder=nil, espCache={}, ballFx={},
+    antiLagAt=0,
+}
+local PRY = {remote=nil, hash=nil, key=nil, encoder=nil, found=false, isURE=false}
+local balls, connections = {}, {}
+
+local function connect(sig, fn)
+    local c = sig:Connect(fn); table.insert(connections, c); return c
+end
+connect(workspace:GetPropertyChangedSignal("CurrentCamera"), function()
+    cam = workspace.CurrentCamera
+end)
+
+local function notify(title, desc, dur)
+    pcall(function()
+        Library:Notification({
+            Title = title, Description = desc, Duration = dur or 2,
+            Icon = "73789337996373",
+        })
+    end)
+end
+
+-- ===========================================================================
+-- MAX FPS BOOSTER
+-- ===========================================================================
+local FPSM = {
+    snapshot = {}, active = false, savedPostEffects = {},
+    savedParts = {}, destroyedDeco = {},
+}
+
+local function snapshotWorld()
+    FPSM.snapshot = {
+        shadows = Lighting.GlobalShadows,
+        brightness = Lighting.Brightness,
+        fogEnd = Lighting.FogEnd,
+        fogStart = Lighting.FogStart,
+        fov = cam and cam.FieldOfView or 70,
+        quality = nil,
+        terrain = {
+            WaterWaveSize = workspace.Terrain.WaterWaveSize,
+            WaterWaveSpeed = workspace.Terrain.WaterWaveSpeed,
+            WaterReflectance = workspace.Terrain.WaterReflectance,
+            WaterTransparency = workspace.Terrain.WaterTransparency,
+        },
+    }
+    local US = game:GetService("UserSettings")
+    if US then pcall(function() FPSM.snapshot.quality = US.SavedQualityLevel end) end
+    for _, e in ipairs(Lighting:GetChildren()) do
+        if e:IsA("PostEffect") then FPSM.savedPostEffects[e] = e.Enabled end
+    end
+end
+
+local function unlockFPS()
+    local cap = CFG.MaxFPS or 999
+    if type(setfpscap) == "function" then pcall(setfpscap, cap) end
+    if type(sethiddenproperty) == "function" then
+        pcall(sethiddenproperty, workspace, "PhysicsSenderRate", 240)
+    end
+end
+
+local function killPostEffects()
+    for _, e in ipairs(Lighting:GetChildren()) do
+        if e:IsA("PostEffect") then pcall(function() e.Enabled = false end) end
+    end
+end
+
+local function killShadows()
+    pcall(function() Lighting.GlobalShadows = false end)
+    pcall(function() Lighting.ShadowSoftness = 0 end)
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") then
+            if not FPSM.savedParts[d] then FPSM.savedParts[d] = {} end
+            FPSM.savedParts[d].CastShadow = d.CastShadow
+            pcall(function() d.CastShadow = false end)
+        end
+    end
+end
+
+local function killWater()
+    pcall(function()
+        workspace.Terrain.WaterWaveSize = 0
+        workspace.Terrain.WaterWaveSpeed = 0
+        workspace.Terrain.WaterReflectance = 0
+        workspace.Terrain.WaterTransparency = 1
+    end)
+end
+
+local function killParticles()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Smoke")
+           or d:IsA("Fire") or d:IsA("Sparkles") or d:IsA("Beam") then
+            pcall(function() d.Enabled = false end)
+        end
+    end
+end
+
+local function stripCharacters()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        local ch = plr.Character
+        if ch then
+            for _, d in ipairs(ch:GetDescendants()) do
+                if d:IsA("Accessory") or d:IsA("Hat") or d:IsA("ShirtGraphic") then
+                    pcall(function() d:Destroy() end)
+                end
+                if d:IsA("BasePart") then
+                    pcall(function()
+                        d.CastShadow = false
+                        d.Material = Enum.Material.SmoothPlastic
+                    end)
+                end
+                if d:IsA("Decal") or d:IsA("Texture") then
+                    pcall(function() d.Transparency = 1 end)
+                end
+            end
+        end
+    end
+end
+
+local WHITELIST = { Balls=true, Alive=true, Terrain=true, Camera=true }
+local function nukeDeco()
+    if not cam then return end
+    local camPos = cam.CFrame.Position
+    for _, d in ipairs(workspace:GetChildren()) do
+        if not WHITELIST[d.Name] and not Players:GetPlayerFromCharacter(d) then
+            if d:IsA("BasePart") then
+                if (d.Position - camPos).Magnitude > 500 and not FPSM.destroyedDeco[d] then
+                    FPSM.destroyedDeco[d] = true
+                    pcall(function() d:Destroy() end)
+                end
+            elseif d:IsA("Model") or d:IsA("Folder") then
+                local ok, pivot = pcall(function() return d:GetPivot() end)
+                if ok and (pivot.Position - camPos).Magnitude > 500
+                   and not FPSM.destroyedDeco[d] then
+                    FPSM.destroyedDeco[d] = true
+                    pcall(function() d:Destroy() end)
+                end
+            end
+        end
+    end
+end
+
+local function shrinkCamera()
+    if cam then pcall(function() cam.FieldOfView = math.min(70, cam.FieldOfView) end) end
+    if type(sethiddenproperty) == "function" then
+        pcall(sethiddenproperty, workspace, "StreamingTargetRadius", 256)
+        pcall(sethiddenproperty, workspace, "StreamingMinRadius", 64)
+    end
+end
+
+local function silenceWorld()
+    pcall(function()
+        Snd.AmbientReverb = Enum.ReverbType.NoReverb
+        Snd.DistanceFactor = 0
+        Snd.DopplerScale = 0
+    end)
+end
+
+local function simplifyMaterials()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") and d.Material ~= Enum.Material.SmoothPlastic then
+            if not FPSM.savedParts[d] then FPSM.savedParts[d] = {} end
+            FPSM.savedParts[d].Material = d.Material
+            pcall(function() d.Material = Enum.Material.SmoothPlastic end)
+        end
+    end
+end
+
+local function applyMaxFPS()
+    if FPSM.active then return end
+    FPSM.active = true
+    if not next(FPSM.snapshot) then pcall(snapshotWorld) end
+    local lvl = CFG.FPSBoostLevel or 5
+    pcall(unlockFPS)
+    if lvl >= 2 then pcall(silenceWorld) end
+    if lvl >= 3 then pcall(killPostEffects) end
+    if lvl >= 4 then pcall(killWater) end
+    if lvl >= 5 then pcall(killShadows) end
+    if lvl >= 5 then pcall(simplifyMaterials) end
+    if lvl >= 6 then pcall(killParticles) end
+    if lvl >= 7 then pcall(stripCharacters) end
+    if lvl >= 8 then pcall(shrinkCamera) end
+    if lvl >= 9 then pcall(nukeDeco) end
+end
+
+local function restoreMaxFPS()
+    FPSM.active = false
+    pcall(function()
+        Lighting.GlobalShadows = FPSM.snapshot.shadows
+        Lighting.Brightness = FPSM.snapshot.brightness
+        Lighting.FogEnd = FPSM.snapshot.fogEnd
+        Lighting.FogStart = FPSM.snapshot.fogStart
+    end)
+    for e, en in pairs(FPSM.savedPostEffects) do
+        if e and e.Parent then pcall(function() e.Enabled = en end) end
+    end
+    for part, data in pairs(FPSM.savedParts) do
+        if part and part.Parent then
+            pcall(function()
+                if data.CastShadow ~= nil then part.CastShadow = data.CastShadow end
+                if data.Material then part.Material = data.Material end
+            end)
+        end
+    end
+    pcall(function()
+        workspace.Terrain.WaterWaveSize = FPSM.snapshot.terrain.WaterWaveSize
+        workspace.Terrain.WaterWaveSpeed = FPSM.snapshot.terrain.WaterWaveSpeed
+        workspace.Terrain.WaterReflectance = FPSM.snapshot.terrain.WaterReflectance
+        workspace.Terrain.WaterTransparency = FPSM.snapshot.terrain.WaterTransparency
+    end)
+    if FPSM.snapshot.quality then
+        local US = game:GetService("UserSettings")
+        if US then pcall(function() US.SavedQualityLevel = FPSM.snapshot.quality end) end
+    end
+end
+
+-- Continuous enforcer
+task.spawn(function()
+    while S.active do
+        task.wait(1)
+        if CFG.FPSBoost and FPSM.active then
+            local lvl = CFG.FPSBoostLevel or 5
+            if lvl >= 5 then pcall(killShadows) end
+            if lvl >= 6 then pcall(killParticles) end
+            if lvl >= 7 then pcall(stripCharacters) end
+            if lvl >= 9 then pcall(nukeDeco) end
+        end
+    end
+end)
+
+-- Anti-Lag
+local function antiLagCleanup()
+    local removed = 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("Trail") or d:IsA("Smoke") or d:IsA("Fire") then
+            local age = os.clock() - (d:GetAttribute("__zeusCreated") or os.clock())
+            if age > 3 then
+                pcall(function() d:Destroy() end); removed = removed + 1
+            end
+        end
+    end
+    for ball, fx in pairs(S.ballFx) do
+        if not ball.Parent then
+            for _, inst in pairs(fx) do pcall(function() inst:Destroy() end) end
+            S.ballFx[ball] = nil; removed = removed + 1
+        end
+    end
+    return removed
+end
+
+task.spawn(function()
+    while S.active do
+        task.wait(1)
+        if CFG.AntiLag and os.clock() - (S.antiLagAt or 0) > (CFG.AntiLagInterval or 5) then
+            S.antiLagAt = os.clock()
+            pcall(antiLagCleanup)
+        end
+    end
+end)
+
+-- ===========================================================================
+-- PRY FINDER
+-- ===========================================================================
+local function findPRYModule()
+    local C = RS:FindFirstChild("Controllers"); if not C then return nil end
+    for _, c in ipairs(C:GetChildren()) do
+        if c.Name:find("SwordsController") or c.Name:find("SwordController") then
+            local p = c:FindFirstChild("PRY"); if p then return p end
+        end
+    end
+    for _, c in ipairs(C:GetDescendants()) do
+        if c:IsA("ModuleScript") and c.Name == "PRY" then return c end
+    end
+end
+
+local function extractEncoder()
+    local pry = findPRYModule(); if not pry then return false end
+    local ok, fn = pcall(require, pry)
+    if not ok or type(fn) ~= "function" then return false end
+    if not debug or type(debug.getupvalues) ~= "function" then return false end
+    local good, uv = pcall(debug.getupvalues, fn)
+    if not good or type(uv) ~= "table" then return false end
+    for _, v in pairs(uv) do
+        if type(v) == "function" and not PRY.encoder then
+            local ok2, test = pcall(v, "test", "TIME")
+            if ok2 and type(test) == "string" then PRY.encoder = v end
+        end
+    end
+    for _, v in pairs(uv) do
+        if type(v) == "string" and #v >= 16 and not PRY.hash then PRY.hash = v
+        elseif type(v) == "number" and not PRY.hash then PRY.hash = v end
+    end
+    for _, v in pairs(uv) do
+        if (type(v) == "number" or (type(v) == "string" and #v <= 32))
+            and v ~= PRY.hash and not PRY.key then PRY.key = v end
+    end
+    return PRY.encoder ~= nil and PRY.hash ~= nil
+end
+
+local function matchesSig(...)
+    local a, b, c, d, e, f, g, h = ...
+    if not (type(a) == "string" or type(a) == "number") then return false end
+    if not (type(b) == "number" or (type(b) == "string" and #b <= 64)) then return false end
+    if type(c) ~= "string" then return false end
+    if type(d) ~= "number" then return false end
+    if typeof(e) ~= "CFrame" then return false end
+    if type(f) ~= "table" or type(g) ~= "table" then return false end
+    if type(h) ~= "boolean" then return false end
+    return true
+end
+
+local function onFireServer(self, ...)
+    if not S.active or PRY.found then return end
+    if typeof(self) ~= "Instance" then return end
+    if not (self:IsA("RemoteEvent") or self:IsA("UnreliableRemoteEvent")) then return end
+    local args = {...}
+    if not matchesSig(table.unpack(args)) then return end
+    PRY.remote = self; PRY.hash = args[1]; PRY.key = args[2]
+    PRY.found = true; PRY.isURE = self:IsA("UnreliableRemoteEvent")
+    S.reason = "Remote found"
+    print("[Zeus] Remote: " .. self:GetFullName() ..
+        (PRY.isURE and " (URE)" or " (RE)"))
+    pcall(extractEncoder)
+    notify("Zeus", "Remote captured" .. (PRY.isURE and " [URE]" or " [RE]"), 3)
+end
+
+if type(hookfunction) == "function" then
+    local function tryHook(inst)
+        pcall(function()
+            local orig
+            orig = hookfunction(inst.FireServer, function(self, ...)
+                pcall(onFireServer, self, ...)
+                return orig(self, ...)
+            end)
+        end)
+    end
+    tryHook(Instance.new("RemoteEvent"))
+    pcall(function() tryHook(Instance.new("UnreliableRemoteEvent")) end)
+end
+
+-- ===========================================================================
+-- TOKEN
+-- ===========================================================================
+local lastToken = nil
+local function getToken()
+    if type(PRY.encoder) == "function" and PRY.key ~= nil then
+        local key = PRY.encoder(PRY.key, "TIME")
+        if type(key) == "string" and #key > 0 then
+            local time = tostring(math.floor(workspace:GetServerTimeNow() * 100))
+            local out = table.create(#time)
+            for i = 1, #time do
+                out[i] = string.char(bit32.bxor(time:byte(i) + i, key:byte((i-1) % #key + 1)))
+            end
+            lastToken = table.concat(out)
+            return lastToken
+        end
+    end
+    return lastToken
+end
+
+-- ===========================================================================
+-- BALLS
+-- ===========================================================================
+local function addBall(ball)
+    if ball:IsA("BasePart") then
+        balls[ball] = {velocity=nil, lastFire=-math.huge, handled=false}
+    end
+end
+for _, b in ipairs(Balls:GetChildren()) do addBall(b) end
+connect(Balls.ChildAdded, addBall)
+connect(Balls.ChildRemoved, function(b)
+    balls[b] = nil
+    if S.ballFx[b] then
+        for _, inst in pairs(S.ballFx[b]) do pcall(function() inst:Destroy() end) end
+        S.ballFx[b] = nil
+    end
+end)
+
+-- ===========================================================================
+-- CHARACTER
+-- ===========================================================================
+local function charState()
+    local c = LP.Character
+    if not c or not c:IsDescendantOf(Alive) then return nil,nil end
+    local r = c:FindFirstChild("HumanoidRootPart") or c.PrimaryPart
+    local h = c:FindFirstChildOfClass("Humanoid")
+    if not r or not h or h.Health <= 0 then return nil,nil end
+    if CFG.RespectGameBlocks and (c:GetAttribute("DoNotParry") or
+       c:GetAttribute("Pulsed") or r:FindFirstChild("SingularityCape")) then
+        return nil,nil
+    end
+    return c, r
+end
+
+local function equipSword()
+    local c = LP.Character; if not c then return end
+    local eq = c:FindFirstChildOfClass("Tool")
+    if eq then
+        local n = eq.Name:lower()
+        if n:find("sword",1,true) or n:find("blade",1,true) then return end
+    end
+    local bp = LP:FindFirstChild("Backpack"); if not bp then return end
+    for _, t in ipairs(bp:GetChildren()) do
+        if t:IsA("Tool") then
+            local n = t.Name:lower()
+            if n:find("sword",1,true) or n:find("blade",1,true) then
+                local h = c:FindFirstChildOfClass("Humanoid")
+                if h then pcall(function() h:EquipTool(t) end) end
+                return
+            end
+        end
+    end
+end
+
+-- ===========================================================================
+-- FIRE ENGINE
+-- ===========================================================================
+local cache = {
+    token=nil, cf=nil, positions=nil, mouse=nil, at=0,
+    targetCPS=nil, lastRamp=0, failStreak=0, lastClean=0,
+    attempts=0, delivered=0, lastWindowReset=0, ure=false,
+}
+
+local function initRate()
+    if cache.targetCPS then return end
+    cache.ure = PRY.isURE or false
+    cache.targetCPS = cache.ure and (CFG.MaxCPS_URE or 4000) or (CFG.MaxCPS or 480)
+    cache.lastClean = os.clock()
+    cache.lastWindowReset = os.clock()
+end
+
+local function buildPositions()
+    local t = {}
+    for _, ch in ipairs(Alive:GetChildren()) do
+        local p = ch.PrimaryPart or ch:FindFirstChild("HumanoidRootPart")
+        if p then
+            local pt = cam:WorldToScreenPoint(p.Position)
+            if pt.Z > 0 then t[ch.Name] = pt end
+        end
+    end
+    return t
+end
+
+local function refreshCache()
+    local now = os.clock()
+    if now - cache.at < 0.03 then return end
+    cache.at = now
+    local t = getToken(); if t then cache.token = t end
+    local root = LP.Character and
+        (LP.Character.PrimaryPart or LP.Character:FindFirstChild("HumanoidRootPart"))
+    if root then
+        cache.cf = CFrame.lookAt(root.Position,
+            root.Position + cam.CFrame.LookVector * 20)
+    end
+    cache.positions = buildPositions()
+    local vp = cam.ViewportSize
+    cache.mouse = {vp.X * 0.5, vp.Y * 0.5}
+end
+
+local function updateAdaptiveRate()
+    if not CFG.AdaptiveRate then return end
+    initRate()
+    local now = os.clock()
+    if now - cache.lastWindowReset > 1.0 then
+        cache.lastWindowReset = now
+        cache.attempts = 0; cache.delivered = 0
+    end
+    if cache.failStreak == 0 and (now - cache.lastClean) > (CFG.SuccessWindow or 2) then
+        cache.lastRamp = now
+        local step = CFG.RateRampStep or 0.10
+        local ceiling = cache.ure and (CFG.MaxCPS_URE or 4000) or (CFG.MaxCPS or 480)
+        cache.targetCPS = math.min(cache.targetCPS * (1 + step), ceiling)
+    end
+end
+
+local function onFireFail()
+    cache.failStreak = cache.failStreak + 1
+    if cache.failStreak >= (CFG.FailureThreshold or 3) then
+        cache.targetCPS = math.max(cache.targetCPS * (CFG.RateBackoffFactor or 0.5), 100)
+        cache.failStreak = 0
+        cache.lastClean = os.clock()
+    end
+end
+
+local function onFireSuccess()
+    cache.failStreak = 0
+    cache.lastClean = os.clock()
+    cache.delivered = cache.delivered + 1
+end
+
+local YIELD_EVERY = 4
+
+local function fireBatchRapid(n, targetBall)
+    if not PRY.remote or not cache.token or not cache.cf then return 0 end
+    local remote = PRY.remote
+    local h, k, t = PRY.hash, PRY.key, cache.token
+    local p = 0.5
+    local cf = cache.cf
+
+    if targetBall and targetBall.Parent then
+        local root = LP.Character and
+            (LP.Character.PrimaryPart or LP.Character:FindFirstChild("HumanoidRootPart"))
+        if root then
+            cf = CFrame.lookAt(root.Position, targetBall.Position + Vector3.new(0, 1.75, 0))
+        end
+    end
+
+    local pos, m = cache.positions, cache.mouse
+    local fired = 0
+
+    if CFG.AntiGhost and not cache.ure then
+        for i = 1, n do
+            if not S.active then break end
+            local ok = pcall(remote.FireServer, remote, h, k, t, p, cf, pos, m, false)
+            if ok then fired = fired + 1; onFireSuccess()
+            else onFireFail() end
+            if i % YIELD_EVERY == 0 and i < n then
+                task.wait()
+                if not CFG.ManualActive and not targetBall then break end
+            end
+        end
+    else
+        cache.attempts = cache.attempts + n
+        pcall(function()
+            for i = 1, n do
+                remote:FireServer(h, k, t, p, cf, pos, m, false)
+                fired = i
+            end
+        end)
+        if fired > 0 then
+            for _ = 1, fired do onFireSuccess() end
+        else onFireFail() end
+    end
+
+    if fired > 0 then
+        S.calls = S.calls + fired
+        S.callsInWindow = S.callsInWindow + fired
+    end
+    return fired
+end
+
+-- ===========================================================================
+-- BALL TRACK
+-- ===========================================================================
+local function readVel(ball)
+    local z = ball:FindFirstChild("zoomies")
+    if z then
+        local ok, v = pcall(function() return z.VectorVelocity end)
+        if ok and typeof(v) == "Vector3" then return v end
+    end
+    return ball.AssemblyLinearVelocity
+end
+
+local function pickTarget(root)
+    local best, bestTti = nil, math.huge
+    for ball, st in pairs(balls) do
+        if ball.Parent ~= Balls then continue end
+        if not ball:GetAttribute("realBall") then continue end
+        if ball:GetAttribute("target") ~= LP.Name then continue end
+        local vel = readVel(ball); st.velocity = vel
+        if vel.Magnitude < 1 then continue end
+        local off = root.Position - ball.Position
+        local dist = off.Magnitude
+        local closing = vel:Dot(off.Unit)
+        if closing <= 0 then continue end
+        local tti = dist / closing
+        if tti < bestTti then
+            bestTti = tti
+            best = {ball=ball, state=st, tti=tti, speed=vel.Magnitude, dist=dist}
+        end
+    end
+    return best
+end
+
+-- ===========================================================================
+-- BALL FX
+-- ===========================================================================
+local function applyBallFX(ball)
+    if not ball.Parent then return end
+    if not S.ballFx[ball] then S.ballFx[ball] = {} end
+    local fx = S.ballFx[ball]
+
+    if CFG.BallTrail and not fx.trail then
+        local a0 = Instance.new("Attachment"); a0.Parent = ball
+        local a1 = Instance.new("Attachment")
+        a1.Position = Vector3.new(0, -ball.Size.Y, 0); a1.Parent = ball
+        local t = Instance.new("Trail")
+        t.Attachment0 = a0; t.Attachment1 = a1
+        t.Lifetime = 0.4
+        t.WidthScale = NumberSequence.new(1.2)
+        t.Color = ColorSequence.new(Color3.fromRGB(CFG.TrailR, CFG.TrailG, CFG.TrailB))
+        t.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.1),
+            NumberSequenceKeypoint.new(1, 1),
+        })
+        t.LightEmission = 0.8
+        t.Parent = ball
+        t:SetAttribute("__zeusCreated", os.clock())
+        fx.trail = t
+    elseif not CFG.BallTrail and fx.trail then
+        pcall(function() fx.trail:Destroy() end); fx.trail = nil
+    elseif CFG.BallTrail and fx.trail then
+        fx.trail.Color = ColorSequence.new(Color3.fromRGB(CFG.TrailR, CFG.TrailG, CFG.TrailB))
+    end
+
+    if CFG.BallFire and not fx.fire then
+        local f = Instance.new("Fire")
+        f.Heat = 5; f.Size = 4
+        f.Color = Color3.fromRGB(CFG.FireR, CFG.FireG, CFG.FireB)
+        f.Parent = ball
+        f:SetAttribute("__zeusCreated", os.clock())
+        fx.fire = f
+    elseif not CFG.BallFire and fx.fire then
+        pcall(function() fx.fire:Destroy() end); fx.fire = nil
+    elseif CFG.BallFire and fx.fire then
+        fx.fire.Color = Color3.fromRGB(CFG.FireR, CFG.FireG, CFG.FireB)
+    end
+
+    if CFG.BallSmoke and not fx.smoke then
+        local s = Instance.new("Smoke")
+        s.Color = Color3.fromRGB(CFG.SmokeR, CFG.SmokeG, CFG.SmokeB)
+        s.Size = 2; s.Opacity = 0.4
+        s.Parent = ball
+        s:SetAttribute("__zeusCreated", os.clock())
+        fx.smoke = s
+    elseif not CFG.BallSmoke and fx.smoke then
+        pcall(function() fx.smoke:Destroy() end); fx.smoke = nil
+    elseif CFG.BallSmoke and fx.smoke then
+        fx.smoke.Color = Color3.fromRGB(CFG.SmokeR, CFG.SmokeG, CFG.SmokeB)
+    end
+
+    if CFG.BallSparkle and not fx.sparkle then
+        local a = Instance.new("Attachment"); a.Parent = ball
+        local pe = Instance.new("ParticleEmitter")
+        pe.Texture = "rbxassetid://241396860"
+        pe.Rate = 25; pe.Lifetime = NumberRange.new(0.3, 0.7)
+        pe.Speed = NumberRange.new(1, 4)
+        pe.Size = NumberSequence.new(0.35)
+        pe.Color = ColorSequence.new(Color3.fromRGB(200, 230, 255))
+        pe.LightEmission = 1
+        pe.Parent = a
+        pe:SetAttribute("__zeusCreated", os.clock())
+        fx.sparkle = pe
+    elseif not CFG.BallSparkle and fx.sparkle then
+        pcall(function() fx.sparkle:Destroy() end); fx.sparkle = nil
+    end
+
+    if CFG.BallGlow and not fx.glow then
+        local pl = Instance.new("PointLight")
+        pl.Brightness = 3; pl.Range = 12
+        pl.Color = Color3.fromRGB(CFG.TrailR, CFG.TrailG, CFG.TrailB)
+        pl.Parent = ball
+        fx.glow = pl
+    elseif not CFG.BallGlow and fx.glow then
+        pcall(function() fx.glow:Destroy() end); fx.glow = nil
+    end
+end
+
+task.spawn(function()
+    while S.active do
+        task.wait(0.3)
+        for ball in pairs(balls) do pcall(applyBallFX, ball) end
+    end
+end)
+
+-- ===========================================================================
+-- HIT SOUND
+-- ===========================================================================
+local function playHitSound()
+    if not CFG.HitSound then return end
+    local s = soundPool[CFG.HitSoundPreset or "Default"]
+    if not s then return end
+    pcall(function()
+        s.Volume = CFG.HitVolume or 0.5
+        s.TimePosition = 0
+        s:Play()
+    end)
+end
+
+-- ===========================================================================
+-- ESP
+-- ===========================================================================
+local function cleanupEsp()
+    if S.espFolder and S.espFolder.Parent then S.espFolder:Destroy() end
+    S.espFolder = nil; S.espCache = {}
+end
+
+local function updateEsp()
+    if not (CFG.EspBalls or CFG.EspPlayers) then
+        if S.espFolder then cleanupEsp() end
+        return
+    end
+    if not S.espFolder or not S.espFolder.Parent then
+        S.espFolder = Instance.new("Folder")
+        S.espFolder.Name = "ZeusESP"
+        S.espFolder.Parent = workspace
+    end
+    local seen = {}
+    if CFG.EspBalls then
+        for ball in pairs(balls) do
+            if ball.Parent ~= Balls then continue end
+            if not ball:GetAttribute("realBall") then continue end
+            local rec = S.espCache[ball]
+            if not rec then
+                local hl = Instance.new("Highlight")
+                hl.FillColor = Color3.fromRGB(255, 60, 60)
+                hl.FillTransparency = 0.6
+                hl.OutlineColor = Color3.fromRGB(255, 180, 60)
+                hl.Adornee = ball
+                hl.Parent = S.espFolder
+                local bb = Instance.new("BillboardGui")
+                bb.Size = UDim2.fromOffset(140, 40)
+                bb.StudsOffsetWorldSpace = Vector3.new(0, 2.4, 0)
+                bb.AlwaysOnTop = true; bb.MaxDistance = 500
+                bb.Adornee = ball; bb.Parent = S.espFolder
+                local lbl = Instance.new("TextLabel")
+                lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1
+                lbl.TextColor3 = Color3.fromRGB(255, 230, 160)
+                lbl.TextStrokeTransparency = 0.4
+                lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 13
+                lbl.Text = ""; lbl.Parent = bb
+                rec = {hl=hl, bb=bb, label=lbl}
+                S.espCache[ball] = rec
+            end
+            seen[ball] = true
+            local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            local parts = {}
+            if CFG.EspDist and root then
+                parts[#parts+1] = string.format("%.0fm", (root.Position - ball.Position).Magnitude)
+            end
+            if ball:GetAttribute("target") == LP.Name then parts[#parts+1] = "TARGET" end
+            rec.label.Text = table.concat(parts, " · ")
+        end
+    end
+    if CFG.EspPlayers then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr == LP then continue end
+            local ch = plr.Character; if not ch then continue end
+            if not ch:FindFirstChild("HumanoidRootPart") then continue end
+            local rec = S.espCache[ch]
+            if not rec then
+                local hl = Instance.new("Highlight")
+                hl.FillColor = Color3.fromRGB(80, 200, 120)
+                hl.FillTransparency = 0.7
+                hl.OutlineColor = Color3.fromRGB(120, 255, 160)
+                hl.Adornee = ch; hl.Parent = S.espFolder
+                rec = {hl=hl}
+                S.espCache[ch] = rec
+            end
+            seen[ch] = true
+        end
+    end
+    for k, rec in pairs(S.espCache) do
+        if not seen[k] then
+            if rec.hl then rec.hl:Destroy() end
+            if rec.bb then rec.bb:Destroy() end
+            S.espCache[k] = nil
+        end
+    end
+end
+
+task.spawn(function()
+    while S.active do
+        task.wait(0.15)
+        pcall(updateEsp)
+    end
+end)
+
+-- ===========================================================================
+-- CHARACTER MODS
+-- ===========================================================================
+task.spawn(function()
+    while S.active do
+        task.wait(0.3)
+        local c = LP.Character
+        if c then
+            local h = c:FindFirstChildOfClass("Humanoid")
+            if h then
+                if CFG.SpeedEnabled then h.WalkSpeed = CFG.SpeedValue end
+                if CFG.JumpEnabled then
+                    pcall(function() h.UseJumpPower = true; h.JumpPower = CFG.JumpValue end)
+                end
+            end
+            if CFG.Noclip then
+                for _, p in ipairs(c:GetDescendants()) do
+                    if p:IsA("BasePart") and p.CanCollide then
+                        pcall(function() p.CanCollide = false end)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while S.active do
+        task.wait(0.1)
+        if CFG.InfiniteJump then
+            local c = LP.Character
+            if c then
+                local h = c:FindFirstChildOfClass("Humanoid")
+                if h then pcall(function() h.Jump = true end) end
+            end
+        end
+    end
+end)
+
+-- ===========================================================================
+-- MAIN STEP
+-- ===========================================================================
+local function step()
+    if not (CFG.AutoParry or CFG.AutoSpam) then S.reason = "Combat off"; return end
+    local now = os.clock()
+    if now < S.backoffUntil then S.reason = "Backoff"; return end
+    local c, r = charState()
+    if not c then S.reason = "Not in round"; return end
+    pcall(equipSword)
+    if not PRY.remote then S.reason = "Waiting for remote"; return end
+    initRate(); updateAdaptiveRate(); refreshCache()
+
+    if CFG.AutoParry then
+        local t = pickTarget(r)
+        if t then
+            if now - t.state.lastFire < CFG.Cooldown then S.reason = "Cooldown"; return end
+            if t.state.handled then S.reason = "Handled"; return end
+            if t.tti > 0.25 then S.reason = string.format("Wait %.3f", t.tti); return end
+            if t.dist > CFG.MaxDist then S.reason = "Too far"; return end
+            t.state.lastFire = now; t.state.handled = true
+            local budget = math.clamp(CFG.MultiFire, 1, 20)
+            fireBatchRapid(budget, t.ball)
+            playHitSound()
+            S.reason = string.format("Fired %.3fs @ %.0f", t.tti, t.speed)
+            task.delay(0.4, function() t.state.handled = false end)
+        else
+            S.reason = "No target ball"
+        end
+    end
+
+    if CFG.AutoSpam then
+        if now - S.lastAttempt < CFG.SpamInterval then return end
+        S.lastAttempt = now
+        fireBatchRapid(5, nil)
+        S.reason = "Auto spam"
+    end
+
+    if CFG.AutoWin then
+        local t = pickTarget(r)
+        if t and t.tti < 0.15 then fireBatchRapid(10, t.ball) end
+    end
+end
+
+connect(Run.Heartbeat, function(dt)
+    if not S.active then return end
+    pcall(step)
+end)
+
+task.spawn(function()
+    while S.active do
+        task.wait(1)
+        S.cps = S.callsInWindow
+        S.callsInWindow = 0
+    end
+end)
+
+-- ===========================================================================
+-- MANUAL SPAM
+-- ===========================================================================
+local lastManualFrame = 0
+
+Run.Stepped:Connect(function()
+    if not S.active or not CFG.ManualActive then return end
+    if not PRY.remote then return end
+    initRate(); updateAdaptiveRate()
+    local now = os.clock()
+    local minInterval = 1 / math.max(cache.targetCPS or 480, 50)
+    if now - lastManualFrame < minInterval then return end
+    lastManualFrame = now
+    refreshCache()
+    local perFrame = math.max(1, math.floor((cache.targetCPS or 480) / 60))
+    if CFG.ManualBurst and CFG.ManualBurst < perFrame then perFrame = CFG.ManualBurst end
+    fireBatchRapid(perFrame, nil)
+end)
+
+-- ===========================================================================
+-- MANUAL BUTTON
+-- ===========================================================================
+local pg = LP:WaitForChild("PlayerGui")
+if pg:FindFirstChild("Zeus_SpamUI") then pg.Zeus_SpamUI:Destroy() end
+
+local spamGui = Instance.new("ScreenGui", pg)
+spamGui.Name = "Zeus_SpamUI"
+spamGui.ResetOnSpawn = false
+spamGui.IgnoreGuiInset = true
+spamGui.DisplayOrder = 99999
+spamGui.Enabled = false
+
+local FADED_BLUE  = Color3.fromRGB(100, 150, 220)
+local BG_DARK     = Color3.fromRGB(20, 22, 30)
+local BG_BUTTON   = Color3.fromRGB(30, 34, 44)
+local BG_ACTIVE   = Color3.fromRGB(100, 150, 220)
+
+local frame = Instance.new("Frame", spamGui)
+frame.Name = "Main"
+frame.Size = UDim2.new(0, 170, 0, 110)
+frame.Position = UDim2.new(0.5, -85, 0.3, 0)
+frame.BackgroundColor3 = BG_DARK
+frame.Active = true; frame.Draggable = true
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+local frameStroke = Instance.new("UIStroke", frame)
+frameStroke.Color = FADED_BLUE; frameStroke.Thickness = 1.5; frameStroke.Transparency = 0.3
+
+local mainBtn = Instance.new("TextButton", frame)
+mainBtn.Name = "MainButton"
+mainBtn.Size = UDim2.new(1, -20, 0, 50)
+mainBtn.Position = UDim2.new(0, 10, 0, 10)
+mainBtn.BackgroundColor3 = BG_BUTTON
+mainBtn.Text = "WAITING..."
+mainBtn.TextColor3 = Color3.new(1, 1, 1)
+mainBtn.Font = Enum.Font.GothamBold
+mainBtn.TextSize = 16; mainBtn.AutoButtonColor = false
+Instance.new("UICorner", mainBtn).CornerRadius = UDim.new(0, 10)
+local btnStroke = Instance.new("UIStroke", mainBtn)
+btnStroke.Color = FADED_BLUE; btnStroke.Thickness = 1; btnStroke.Transparency = 0.5
+
+local subLabel = Instance.new("TextLabel", frame)
+subLabel.Name = "SubLabel"
+subLabel.Size = UDim2.new(1, 0, 0, 30)
+subLabel.Position = UDim2.new(0, 0, 1, -35)
+subLabel.BackgroundTransparency = 1
+subLabel.Text = "NEED DATA"
+subLabel.TextColor3 = FADED_BLUE
+subLabel.Font = Enum.Font.GothamBold
+subLabel.TextSize = 13
+
+local function setManualVisible(v)
+    CFG.ManualBtn = v
+    spamGui.Enabled = v
+    if not v then CFG.ManualActive = false end
+end
+
+mainBtn.MouseButton1Click:Connect(function()
+    if not PRY.remote then mainBtn.Text = "NEED BALL"; return end
+    CFG.ManualActive = not CFG.ManualActive
+    if CFG.ManualActive then
+        mainBtn.Text = "SPAMMING"
+        mainBtn.BackgroundColor3 = BG_ACTIVE
+    else
+        mainBtn.Text = "READY"
+        mainBtn.BackgroundColor3 = BG_BUTTON
+        task.delay(0.3, function()
+            if not CFG.ManualActive then
+                mainBtn.Text = "READY"
+                subLabel.Text = "STATUS: PRIME"
+            end
+        end)
+    end
+end)
+
+task.spawn(function()
+    while S.active and spamGui.Parent do
+        if not PRY.remote then
+            mainBtn.Text = "WAITING..."
+            subLabel.Text = "NEED DATA"
+            mainBtn.BackgroundColor3 = BG_BUTTON
+        elseif not CFG.ManualActive then
+            mainBtn.Text = "READY"
+            subLabel.Text = "STATUS: PRIME"
+            mainBtn.BackgroundColor3 = BG_BUTTON
+        else
+            mainBtn.Text = "SPAMMING"
+            local mode = cache.ure and "URE" or "RE"
+            subLabel.Text = string.format("%s | %d / %d",
+                mode, S.cps or 0, math.floor(cache.targetCPS or 0))
+            mainBtn.BackgroundColor3 = BG_ACTIVE
+        end
+        task.wait(0.2)
+    end
+end)
+
+-- ===========================================================================
+-- UI · COMBAT
+-- ===========================================================================
+Window:Category("Combat")
+local CombatPage = Window:Page({ Name = "Auto Parry", Icon = "138827881557940" })
+local ParrySec = CombatPage:Section({ Name = "Auto Parry", Side = 1 })
+local SpamSec  = CombatPage:Section({ Name = "Auto Spam", Side = 2 })
+
+ParrySec:Toggle({ Name = "Auto Parry", Flag = "AutoParry", Default = false,
+    Callback = function(v) CFG.AutoParry = v
+        notify("Zeus", "Auto Parry: " .. (v and "ON" or "OFF"), 1.5) end })
+ParrySec:Slider({ Name = "Cooldown", Flag = "Cooldown", Min = 0.01, Max = 0.3, Default = 0.05, Suffix = "s",
+    Callback = function(v) CFG.Cooldown = v end })
+ParrySec:Slider({ Name = "Multi Fire", Flag = "MultiFire", Min = 1, Max = 20, Default = 3,
+    Callback = function(v) CFG.MultiFire = math.floor(v) end })
+ParrySec:Toggle({ Name = "Predictive Aim", Flag = "Prediction", Default = true,
+    Callback = function(v) CFG.Prediction = v end })
+ParrySec:Toggle({ Name = "Respect Blocks", Flag = "RespectBlocks", Default = true,
+    Callback = function(v) CFG.RespectGameBlocks = v end })
+ParrySec:Button({ Name = "Panic Volley",
+    Callback = function()
+        local c, r = charState(); if not c then return end
+        refreshCache(); fireBatchRapid(15, nil)
+        notify("Zeus", "Panic volley fired", 2)
+    end })
+
+SpamSec:Toggle({ Name = "Auto Spam", Flag = "AutoSpam", Default = false,
+    Callback = function(v) CFG.AutoSpam = v
+        notify("Zeus", "Auto Spam: " .. (v and "ON" or "OFF"), 1.5) end })
+SpamSec:Slider({ Name = "Spam Interval", Flag = "SpamInterval", Min = 0.005, Max = 0.5, Default = 0.05, Suffix = "s",
+    Callback = function(v) CFG.SpamInterval = v end })
+SpamSec:Toggle({ Name = "Auto Win", Flag = "AutoWin", Default = false,
+    Callback = function(v) CFG.AutoWin = v end })
+SpamSec:Button({ Name = "Show Manual Button",
+    Callback = function() setManualVisible(true) end })
+SpamSec:Button({ Name = "Hide Manual Button",
+    Callback = function() setManualVisible(false) end })
+SpamSec:Slider({ Name = "Fires per frame (cap)", Flag = "ManualBurst", Min = 1, Max = 30, Default = 8,
+    Callback = function(v) CFG.ManualBurst = math.floor(v) end })
+SpamSec:Slider({ Name = "Max CPS (RE cap)", Flag = "MaxCPS", Min = 100, Max = 1000, Default = 480,
+    Callback = function(v) CFG.MaxCPS = math.floor(v) end })
+SpamSec:Toggle({ Name = "Anti-Ghost (yield)", Flag = "AntiGhost", Default = true,
+    Callback = function(v) CFG.AntiGhost = v end })
+SpamSec:Toggle({ Name = "Adaptive Rate", Flag = "AdaptiveRate", Default = true,
+    Callback = function(v) CFG.AdaptiveRate = v end })
+SpamSec:Slider({ Name = "URE ceiling", Flag = "MaxCPS_URE", Min = 500, Max = 8000, Default = 4000,
+    Callback = function(v) CFG.MaxCPS_URE = math.floor(v) end })
+SpamSec:Slider({ Name = "Rate ramp %", Flag = "RateRampStep", Min = 0.02, Max = 0.5, Default = 0.10, Suffix = "",
+    Callback = function(v) CFG.RateRampStep = v end })
+
+-- ===========================================================================
+-- UI · PERFORMANCE
+-- ===========================================================================
+Window:Category("Performance")
+
+local PerfPage = Window:Page({ Name = "Max FPS", Icon = "10734950309" })
+local PerfL = PerfPage:Section({ Name = "FPS Booster", Side = 1 })
+local PerfR = PerfPage:Section({ Name = "Anti-Lag", Side = 2 })
+
+PerfL:Toggle({ Name = "Enable Max FPS", Flag = "FPSBoost", Default = false,
+    Callback = function(v)
+        CFG.FPSBoost = v
+        if v then pcall(applyMaxFPS) else pcall(restoreMaxFPS) end
+        notify("Zeus", "Max FPS: " .. (v and "ON" or "OFF"), 1.5)
+    end })
+
+PerfL:Slider({ Name = "Boost Level (1-9)", Flag = "FPSBoostLevel",
+    Min = 1, Max = 9, Default = 5,
+    Callback = function(v)
+        CFG.FPSBoostLevel = math.floor(v)
+        if CFG.FPSBoost then
+            FPSM.active = false
+            pcall(applyMaxFPS)
+        end
+    end })
+
+PerfL:Slider({ Name = "Max FPS Cap", Flag = "MaxFPS",
+    Min = 60, Max = 999, Default = 999,
+    Callback = function(v)
+        CFG.MaxFPS = math.floor(v)
+        if CFG.FPSBoost then pcall(unlockFPS) end
+    end })
+
+PerfL:Button({ Name = "Apply Now",
+    Callback = function()
+        FPSM.active = false
+        pcall(applyMaxFPS)
+        notify("Zeus", "Max FPS applied — level " .. CFG.FPSBoostLevel, 2)
+    end })
+
+PerfL:Button({ Name = "Restore Defaults",
+    Callback = function()
+        pcall(restoreMaxFPS)
+        notify("Zeus", "Restored", 2)
+    end })
+
+PerfL:Paragraph({
+    Header = "Level effects (stack)",
+    Body = "1 · FPS unlock\n2 · Silence ambient reverb\n3 · Disable post-effects\n4 · Kill water waves\n5 · Disable shadows\n5 · Simplify materials\n6 · Kill particles/trails\n7 · Strip character accessories\n8 · Shrink camera\n9 · Nuke decorations >500 studs"
+})
+
+PerfR:Toggle({ Name = "Anti-Lag", Flag = "AntiLag", Default = false,
+    Callback = function(v)
+        CFG.AntiLag = v
+        notify("Zeus", "Anti-Lag: " .. (v and "ON" or "OFF"), 1.5)
+    end })
+
+PerfR:Slider({ Name = "Cleanup interval", Flag = "AntiLagInterval",
+    Min = 1, Max = 30, Default = 5, Suffix = "s",
+    Callback = function(v) CFG.AntiLagInterval = math.floor(v) end })
+
+PerfR:Button({ Name = "Clean now",
+    Callback = function()
+        local removed = antiLagCleanup()
+        notify("Zeus", "Cleaned " .. tostring(removed) .. " objects", 2)
+    end })
+
+PerfR:Paragraph({
+    Header = "Why this helps AP",
+    Body = "Every frame saved = one more parry tick processed. At 240 FPS you get 4x the parry opportunities vs 60 FPS. Fewer particles = less remote-queue contention = fewer ghost frames during spam."
+})
+
+-- ===========================================================================
+-- UI · VISUALS
+-- ===========================================================================
+Window:Category("Visuals")
+
+local BallPage = Window:Page({ Name = "Ball FX", Icon = "138827881557940" })
+local BallL = BallPage:Section({ Name = "Trail & Fire", Side = 1 })
+local BallR = BallPage:Section({ Name = "Smoke & Extras", Side = 2 })
+
+BallL:Toggle({ Name = "Ball Trail", Flag = "BallTrail", Default = false,
+    Callback = function(v) CFG.BallTrail = v end })
+BallL:Label("Trail Color"):Colorpicker({ Name = "Trail Color", Flag = "TrailColor",
+    Default = Color3.fromRGB(100, 150, 220),
+    Callback = function(c)
+        CFG.TrailR = math.floor(c.R * 255 + 0.5)
+        CFG.TrailG = math.floor(c.G * 255 + 0.5)
+        CFG.TrailB = math.floor(c.B * 255 + 0.5)
+    end })
+BallL:Toggle({ Name = "Ball Fire", Flag = "BallFire", Default = false,
+    Callback = function(v) CFG.BallFire = v end })
+BallL:Label("Fire Color"):Colorpicker({ Name = "Fire Color", Flag = "FireColor",
+    Default = Color3.fromRGB(255, 120, 40),
+    Callback = function(c)
+        CFG.FireR = math.floor(c.R * 255 + 0.5)
+        CFG.FireG = math.floor(c.G * 255 + 0.5)
+        CFG.FireB = math.floor(c.B * 255 + 0.5)
+    end })
+
+BallR:Toggle({ Name = "Ball Smoke", Flag = "BallSmoke", Default = false,
+    Callback = function(v) CFG.BallSmoke = v end })
+BallR:Label("Smoke Color"):Colorpicker({ Name = "Smoke Color", Flag = "SmokeColor",
+    Default = Color3.fromRGB(200, 200, 200),
+    Callback = function(c)
+        CFG.SmokeR = math.floor(c.R * 255 + 0.5)
+        CFG.SmokeG = math.floor(c.G * 255 + 0.5)
+        CFG.SmokeB = math.floor(c.B * 255 + 0.5)
+    end })
+BallR:Toggle({ Name = "Ball Sparkles", Flag = "BallSparkle", Default = false,
+    Callback = function(v) CFG.BallSparkle = v end })
+BallR:Toggle({ Name = "Ball Glow Light", Flag = "BallGlow", Default = false,
+    Callback = function(v) CFG.BallGlow = v end })
+
+local EspPage = Window:Page({ Name = "ESP", Icon = "10734950309" })
+local EspL = EspPage:Section({ Name = "ESP", Side = 1 })
+local SndR = EspPage:Section({ Name = "Hit Sound", Side = 2 })
+
+EspL:Toggle({ Name = "Ball ESP", Flag = "EspBalls", Default = false,
+    Callback = function(v) CFG.EspBalls = v end })
+EspL:Toggle({ Name = "Player ESP", Flag = "EspPlayers", Default = false,
+    Callback = function(v) CFG.EspPlayers = v end })
+EspL:Toggle({ Name = "Show Distance", Flag = "EspDist", Default = true,
+    Callback = function(v) CFG.EspDist = v end })
+
+SndR:Toggle({ Name = "Hit Sound", Flag = "HitSound", Default = false,
+    Callback = function(v) CFG.HitSound = v end })
+SndR:Dropdown({ Name = "Sound Preset", Flag = "SoundPreset", Default = {"Default"},
+    Items = {"Default", "Sword", "Slash", "Punch", "Metal", "Boom", "Pop", "Chime"},
+    Multi = false,
+    Callback = function(v)
+        local sel = v
+        if type(v) == "table" then for k in pairs(v) do sel = k end end
+        CFG.HitSoundPreset = sel
+        task.spawn(playHitSound)
+    end })
+SndR:Slider({ Name = "Volume", Flag = "HitVolume", Min = 0, Max = 1, Default = 0.5,
+    Callback = function(v)
+        CFG.HitVolume = v
+        for _, s in pairs(soundPool) do s.Volume = v end
+    end })
+SndR:Button({ Name = "Test Sound",
+    Callback = function()
+        playHitSound()
+        notify("Zeus", "Playing: " .. CFG.HitSoundPreset, 2)
+    end })
+
+-- ===========================================================================
+-- UI · UNLOCK
+-- ===========================================================================
+Window:Category("Unlock")
+local UnlockPage = Window:Page({ Name = "Unlock All", Icon = "138827881557940" })
+local UnlockL = UnlockPage:Section({ Name = "Unlock", Side = 1 })
+local UnlockR = UnlockPage:Section({ Name = "Character", Side = 2 })
+
+UnlockL:Button({ Name = "UNLOCK ALL",
+    Callback = function()
+        notify("Zeus", "Loading unlock script...", 3)
+        local ok2, err = pcall(function()
+            loadstring(game:HttpGet("https://pastebin.com/wSuhUFTr"))()
+        end)
+        if ok2 then notify("Zeus", "Successfully unlocked all", 5)
+        else notify("Zeus", "Unlock failed: " .. tostring(err), 5) end
+    end })
+
+UnlockR:Toggle({ Name = "Speed", Flag = "SpeedT", Default = false,
+    Callback = function(v) CFG.SpeedEnabled = v end })
+UnlockR:Slider({ Name = "Speed Value", Flag = "SpeedV", Min = 16, Max = 200, Default = 16, Suffix = " studs",
+    Callback = function(v) CFG.SpeedValue = v end })
+UnlockR:Toggle({ Name = "Jump Power", Flag = "JumpT", Default = false,
+    Callback = function(v) CFG.JumpEnabled = v end })
+UnlockR:Slider({ Name = "Jump Value", Flag = "JumpV", Min = 50, Max = 300, Default = 50,
+    Callback = function(v) CFG.JumpValue = v end })
+UnlockR:Toggle({ Name = "Infinite Jump", Flag = "IJ", Default = false,
+    Callback = function(v) CFG.InfiniteJump = v end })
+UnlockR:Toggle({ Name = "Noclip", Flag = "Noclip", Default = false,
+    Callback = function(v) CFG.Noclip = v end })
+
+-- ===========================================================================
+-- UI · SETTINGS
+-- ===========================================================================
+Window:Category("Settings")
+local SettingsPage = Library:CreateSettingsPage(Window, KeybindList)
+
+local UtilPage = Window:Page({ Name = "Utilities", Icon = "10734950309" })
+local UtilSec = UtilPage:Section({ Name = "Maintenance", Side = 1 })
+
+UtilSec:Button({ Name = "Rescan for parry remote",
+    Callback = function()
+        PRY.found = false; PRY.remote = nil; cache.targetCPS = nil
+        pcall(extractEncoder)
+        notify("Zeus", "Rescanning — throw a manual parry", 3)
+    end })
+UtilSec:Button({ Name = "Reset adaptive rate",
+    Callback = function()
+        cache.targetCPS = nil; cache.failStreak = 0
+        cache.lastClean = os.clock()
+        notify("Zeus", "Adaptive rate reset", 2)
+    end })
+UtilSec:Button({ Name = "Reset ball FX",
+    Callback = function()
+        S.ballFx = {}
+        notify("Zeus", "Ball FX reset", 2)
+    end })
+UtilSec:Button({ Name = "Reload sound pool",
+    Callback = function()
+        for name, id in pairs(SOUND_IDS) do
+            local s = soundPool[name]
+            if s then
+                s.SoundId = "rbxassetid://" .. id
+                pcall(function() s:Play(); s:Stop() end)
+            end
+        end
+        notify("Zeus", "Sounds reloaded", 2)
+    end })
+
+-- ===========================================================================
+-- INIT
+-- ===========================================================================
+Window:Init()
+
+Window.onUnloaded(function()
+    S.active = false
+    if spamGui then spamGui:Destroy() end
+    for _, s in pairs(soundPool) do pcall(function() s:Destroy() end) end
+    pcall(restoreMaxFPS)
+end)
+
+getgenv().ZeusStop = function()
+    S.active = false
+    if spamGui then spamGui:Destroy() end
+end
+
+pcall(function()
+    Library:Notification({
+        Title = "Zeus v21.6",
+        Description = "Loaded. Do one manual parry to capture the remote.",
+        Duration = 5, Icon = "73789337996373",
+    })
+end)
+
+task.spawn(function()
+    task.wait(0.5)
+    if extractEncoder() then print("[Zeus] Encoder extracted")
+    else print("[Zeus] Encoder will load after first parry") end
+end)
+
+print("[Zeus] DONE")
